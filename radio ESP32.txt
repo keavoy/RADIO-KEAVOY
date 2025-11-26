@@ -16,8 +16,8 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);  // Sprawdź adres: 0x27 lub 0x3F
 int lastClk = HIGH;
 
 // WiFi
-const char* ssid = "KEAWOJ";
-const char* password = "93371209";
+const char* ssid = "podaj tu swój ssid";
+const char* password = "podaj tu swoje hasło wifi";
 
 // Stacje radiowe
 struct Station {
@@ -33,11 +33,11 @@ Station stations[] = {
   { "RMF MAXX",        "http://rmfstream1.interia.pl:8000/rmf_maxxx" },
   { "POPRADIO",        "http://stream1.popradio.pl:9000/" },
   { "ESKA Rock",       "http://ic1.smcdn.pl/5380-1.mp3" },
-  { "SUPER FM",        "http://stream.super.fm:8000/superfm.mp3"},
+  { "SUPER FM",        "http://stream.super.fm:8000/superfm.mp3"}, // można dodać woje linki według powyższego schematu. Kod nie obsługuje https!!!
 };
 const int stationCount = sizeof(stations) / sizeof(Station);
 int currentStation = 0;
-const int volume = 10; // 10% głośność STAŁA
+const int volume = 10; // 10% głośność STAŁA - można wpisać dowolną wartość. Potrzebny wzmacniacz z regulacją głośności
 
 // Audio
 #define I2S_DATA_OUT 25
@@ -194,3 +194,4 @@ void updateDisplay() {
     if (scrollPos > metaLen) scrollPos = 0;
   }
 }
+
