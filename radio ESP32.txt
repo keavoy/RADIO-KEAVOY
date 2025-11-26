@@ -1,0 +1,196 @@
+#include <WiFi.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <AudioFileSourceICYStream.h>
+#include <AudioGeneratorMP3.h>
+#include <AudioOutputI2S.h>
+#include <Preferences.h>
+
+// LCD 1602 I2C
+LiquidCrystal_I2C lcd(0x27, 16, 2);  // Sprawdź adres: 0x27 lub 0x3F
+
+// Enkoder
+#define ENCODER_CLK 32
+#define ENCODER_DT  33
+#define ENCODER_SW  27
+int lastClk = HIGH;
+
+// WiFi
+const char* ssid = "KEAWOJ";
+const char* password = "93371209";
+
+// Stacje radiowe
+struct Station {
+  const char *name;
+  const char *url;
+};
+
+Station stations[] = {
+  { "RADIO ZET",       "http://zet090-02.cdn.eurozet.pl:8404/" },
+  { "POGODA",          "http://stream13.radioagora.pl/tuba38-1.mp3" },
+  { "ESKA",            "http://ic1.smcdn.pl/2380-1.mp3" },
+  { "RMF FM",          "http://195.150.20.9:8000/rmf_fm" },
+  { "RMF MAXX",        "http://rmfstream1.interia.pl:8000/rmf_maxxx" },
+  { "POPRADIO",        "http://stream1.popradio.pl:9000/" },
+  { "ESKA Rock",       "http://ic1.smcdn.pl/5380-1.mp3" },
+  { "SUPER FM",        "http://stream.super.fm:8000/superfm.mp3"},
+};
+const int stationCount = sizeof(stations) / sizeof(Station);
+int currentStation = 0;
+const int volume = 10; // 10% głośność STAŁA
+
+// Audio
+#define I2S_DATA_OUT 25
+#define I2S_BCLK     26
+#define I2S_LRCK     23
+AudioGeneratorMP3 *mp3 = nullptr;
+AudioFileSourceICYStream *file = nullptr;
+AudioOutputI2S *out = nullptr;
+
+// Metadane
+char currentMeta[128] = "Czekam...";
+Preferences preferences;
+
+// Scroll
+int scrollPos = 0;
+unsigned long lastScroll = 0;
+const int scrollDelay = 150; // ms
+
+// Wątek LCD
+TaskHandle_t lcdTaskHandle;
+
+void MDCallback(void *cbData, const char *type, bool isUnicode, const char *meta) {
+  if (strcmp(type, "StreamTitle") == 0) {
+    strncpy(currentMeta, meta, sizeof(currentMeta) - 1);
+    currentMeta[sizeof(currentMeta) - 1] = '\0';
+    scrollPos = 0;
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("Laczenie WiFi...");
+
+  // Enkoder
+  pinMode(ENCODER_CLK, INPUT_PULLUP);
+  pinMode(ENCODER_DT, INPUT_PULLUP);
+  pinMode(ENCODER_SW, INPUT_PULLUP);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  int retries = 0;
+  while (WiFi.status() != WL_CONNECTED && retries < 20) {
+    delay(500);
+    lcd.print(".");
+    retries++;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    lcd.setCursor(0, 1);
+    lcd.print("Blad WiFi");
+    while (true);
+  }
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("WiFi OK");
+
+  preferences.begin("radio", false);
+  currentStation = preferences.getInt("lastStation", 0);
+  if (currentStation < 0 || currentStation >= stationCount) currentStation = 0;
+
+  out = new AudioOutputI2S();
+  out->SetPinout(I2S_BCLK, I2S_LRCK, I2S_DATA_OUT);
+  out->SetGain(volume / 100.0);
+
+  playStation(currentStation);
+  delay(1000);
+
+  // Uruchom wątek LCD na drugim rdzeniu
+  xTaskCreatePinnedToCore(
+    lcdTask, "LCD Task", 2048, NULL, 1, &lcdTaskHandle, 1
+  );
+}
+
+void loop() {
+  if (mp3 && !mp3->loop()) {
+    playStation(currentStation);
+  }
+
+  // Enkoder obrót
+  int currentClk = digitalRead(ENCODER_CLK);
+  if (currentClk != lastClk && currentClk == LOW) {
+    int dtValue = digitalRead(ENCODER_DT);
+    if (dtValue != currentClk) {
+      currentStation = (currentStation + 1) % stationCount;
+    } else {
+      currentStation = (currentStation - 1 + stationCount) % stationCount;
+    }
+
+    preferences.putInt("lastStation", currentStation);
+    playStation(currentStation);
+    scrollPos = 0;
+  }
+  lastClk = currentClk;
+
+  delay(1); // nie blokuj rdzenia
+}
+
+void playStation(int index) {
+  if (file) { file->close(); delete file; file = nullptr; }
+  if (mp3) { mp3->stop(); delete mp3; mp3 = nullptr; }
+
+  file = new AudioFileSourceICYStream(stations[index].url);
+  file->RegisterMetadataCB(MDCallback, nullptr);
+  mp3 = new AudioGeneratorMP3();
+  mp3->begin(file, out);
+
+  strncpy(currentMeta, "Czekam na tytul...", sizeof(currentMeta) - 1);
+  currentMeta[sizeof(currentMeta) - 1] = '\0';
+  scrollPos = 0;
+}
+
+void lcdTask(void *pvParameters) {
+  for (;;) {
+    updateDisplay();
+    delay(scrollDelay);  // co 200ms
+  }
+}
+
+void updateDisplay() {
+  static char lastStationName[17] = "";
+
+  // Jeśli nazwa stacji się zmieniła — aktualizuj górną linię
+  if (strcmp(lastStationName, stations[currentStation].name) != 0) {
+    lcd.setCursor(0, 0);
+    lcd.print("                ");  // wyczyść
+    lcd.setCursor(0, 0);
+    lcd.print(stations[currentStation].name);
+    strncpy(lastStationName, stations[currentStation].name, 16);
+    lastStationName[16] = '\0';
+  }
+
+  // Przewijanie dolnej linii z metadanymi
+  int metaLen = strlen(currentMeta);
+  if (metaLen <= 16) {
+    lcd.setCursor(0, 1);
+    lcd.print(currentMeta);
+    lcd.print("                ");
+  } else {
+    char displayLine[17];
+    for (int i = 0; i < 16; i++) {
+      int idx = (scrollPos + i) % (metaLen + 1);
+      displayLine[i] = currentMeta[idx] ? currentMeta[idx] : ' ';
+    }
+    displayLine[16] = '\0';
+
+    lcd.setCursor(0, 1);
+    lcd.print(displayLine);
+    scrollPos++;
+    if (scrollPos > metaLen) scrollPos = 0;
+  }
+}
